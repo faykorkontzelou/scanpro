@@ -1,0 +1,667 @@
+---
+title: |
+  <center> Marketing Analytics Report  </center>
+  <center> SCAN$*$PRO Model: Do Beer Promotions Pay Off? </center>
+
+author: "Fay Korkontzelou (01620993)"
+date: "1 May 2020"
+output: html_document
+---
+
+*** 
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(knitr)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+ggplot2::theme_set(ggplot2::theme_bw())
+library(kableExtra)
+library(readxl)
+library(forecast)
+library(tseries)
+library(vars)
+library(lme4)
+library(sjPlot)
+library(GGally)
+
+setwd("C:/Users/Fay_Asus/Documents/MSc/RMA/Individual assignment")
+data <- read_xlsx("beer_data_chicago_Dominicks.xlsx")
+```
+
+
+#### **1. Introduction**
+
+Retail businesses run regular promotions to remind existing customers to buy more frequently and in high quantity, and to trigger new product trials and make new customers switch permanently. Price promotions can have a substantial effect on retailers' sales or revenue performance, however, after a promotion runs its course, customers perhaps quickly return to their old buying patterns, and sales drop back to normal levels. On the other hand, a promotion can reduce a store's overall revenue as consumers of high-priced brands may temporarily shift to the cheaper brands. A retailer may also find that buyers refuse to purchase a heavily promoted product once it returns to its higher price.
+
+It is important for retailers to understand the incremental value that promotions generate; that is, how many sales can be attributed to promotions. To do so, retailers have to distinguish the incremental sales due to adopted promotional strategies from the baseline sales, which will include other marketplace conditions that affect the sales of a product. The $SCAN{*}PRO$ model is a model commonly used to uncover promotion effects on top of baseline sales.
+
+Promotions are a key driver in retail demand and can have a positive impact on both a brand's sales and image. In this report I try to uncover the dynamics of display and features promotions and examine how they contribute to retail performance of beer sales.
+
+<br/>  
+
+#### **2. Data Description**  
+
+The dataset consists of store-level scanner records for three beer products - brand 1, 2, 3 - collected at Dominick's Finer Foods supermarket chain from September 1989 to September 1994. However, due to missing observations in the category beer, the dataset consists of a total of 227 weeks instead of 265 weeks (Srinivasan et al., 2004). For the purpose of this analysis, it is assumed that the missing observations are at end of the period and the data is treated as a consecutive time series with start in September 1989. The relevant variables in the dataset are:
+
+* week number (1 to 227) 
+
+* brand specific sales (aggregated from the SKU to the brand level). In the analysis, I assume that all sales originate from retailer only and not wholesale. Hence only retail prices are considered.  
+
+* retail prices for each brand  
+
+* feature and display indicators called price specials and bonus buys in the DFF's data description. These variables are operationalized as the percentage of SKUs of the brand that are promoted in a given week   
+
+<br/>  
+
+The dataset contains of observations for the three best-selling brands from DFF (Srinivasan et al., 2004), with brand 1 and brand 2 performing significantly better than brand 3 in terms of sales volume. Figure 1, illustrates that over the time horizon of 227 weeks sales for all three beer brands oscillate around the average, represented by the horizontal red lines. Deviations from the mean level of sales are temporary and there is no stochastic upward or downward trend in sales performance, Marketing efforts through price specials and bonus buys are thus temporary. Moreover, brand sales are seasonal with annual periodicity - seen from the u-shaped sales cycle until the next cycle start - represented by vertical dashed lines. The seasonality in beer sales observed below agrees with the findings of Gao, Wailes and Cramer (1995) who found that alcohol consumption in the US is higher in the winter and lower in the summer compared with consumption in the autumn. The result is used to guide the model specification with the intention to explore quarterly variations in consumption.
+
+<br/>  
+
+```{r visualise_sales, echo=FALSE}
+sales <- data %>% dplyr::select(Week, SALESBRAND1, SALESBRAND2, SALESBRAND3) %>% gather("brand", "sales", 2:4)
+means <- sales %>% group_by(brand) %>% summarise(m = mean(sales))
+y <- data.frame(w = c(52, 104, 156, 208))
+time_labels <- c("1989", "1990", "1991", "1992", "1993")
+
+ggplot(sales, aes(x=Week, y=sales)) +
+  geom_line(color="steelblue") +
+  facet_grid(brand ~ .) +
+  geom_hline(data=means, aes(yintercept=m), colour = "darkred", lwd = 0.05, alpha = 0.5) +
+  geom_vline(aes(xintercept = w), data = y, colour = "darkblue", linetype = "dashed", lwd = 0.05, alpha = 0.5) +
+  labs(title = "Figure 1: Weekly Sales per brand", x= "Week", y="Sales") +
+  theme(plot.title = element_text(colour = "grey40", size = 11, face = "italic"))
+
+```
+```{r qrt_dummy, include=FALSE}
+qrt_per_year <- 4
+weeks_per_year <- 52
+n <- nrow(data)
+# assign qrt from september 1989 to end of year
+qrt <- c(3,3,3,3,rep(4,weeks_per_year/qrt_per_year))
+l <- length(qrt)
+
+
+# loop to get a vector of quarter numbers for remaining weeks up to 5 years
+for (j in 1:(floor((n-l)/weeks_per_year)+1)){
+  for (i in 1:qrt_per_year){
+    qrt <- c(qrt, rep(i,weeks_per_year/qrt_per_year))
+  }
+}
+
+# keep 227 weeks - approximately 4.4 years
+qrt <- qrt[1:n]
+
+# add quarter data in dataset
+data$Quarter <- qrt
+
+# get dummies for each quarter
+data <- fastDummies::dummy_cols(data, select_columns = "Quarter")
+
+# check quarter dummies in dataset
+head(data[,c(tail(names(data),5))])
+```
+<br/>  
+
+It is worth noting that peaks in sales in Figure 1 coincide with troughs in price (Appendix A Figure 3). To better understand how sales are affected by promotions and price, before building the model, I look at the correlations of predictors and sales and correlations between predictors. In Figure 2, the expected relations are present for the three beer brands. 
+
+There is a strong negative correlation between sales and price, as known from Economics theory, which is higher than 0.5 for all three brands. Display is positively correlated with sales, as display advertising increases sales, which is higher for brand 1 (0.38). Feature advertising has the lowest correlation with sales among predictors, but still exhibits the expected positive relationship for brand 1 and brand 3, while for brand 2 the correlation is almost negligible.
+
+Feature and display variables indicate price specials and bonus buys in DFF stores and are expected to be strongly negatively correlated with price since these variables are capturing the same measure from a different perspective to some extent. Indeed, this relationship is present for brands 1 and 3, but not for brand 2. Specifically, the correlation of price and display is higher than that of price and feature, which is likely due to the larger number of display promotions in the dataset. The OLS model was tested for multicollinearity issues.
+
+<br/>  
+
+```{r correlations, echo=FALSE, message=FALSE}
+ggpairs(data[,c("SALESBRAND1", "PRICEBRAND1", "display_brand1", "FEATUREBRAND1")], 
+        title = "Figure 2a: Brand 1 Correlations",
+        lower = list(continuous = wrap("smooth", size=0.1))) +
+  theme(plot.title = element_text(colour = "grey40", size = 11, face = "italic"))
+ggpairs(data[,c("SALESBRAND2", "PRICEBRAND2", "display_brand2", "FEATUREBRAND2")],
+        title = "Figure 2b: Brand 2 Correlations",
+        lower = list(continuous = wrap("smooth", size=0.1))) +
+  theme(plot.title = element_text(colour = "grey40", size = 11, face = "italic"))
+ggpairs(data[,c("SALESBRAND3", "PRICEBRAND3", "display_brand3", "FEATUREBRAND3")],
+        title = "Figure 2c: Brand 3 Correlations",
+        lower = list(continuous = wrap("smooth", size=0.1))) +
+  theme(plot.title = element_text(colour = "grey40", size = 11, face = "italic"))
+```
+
+<br/>  
+
+#### **3. Model and Estimation**  
+
+In order to quantify the effects of promotional activities for beer we will use the $SCAN{*}PRO$ model. The general model is a multiplicative model which decomposes sales for brand j (1,...,n) in store k (1,...,K) during week t (1,...,T) into own and cross brand effects of price, feature advertising, and display advertising, week effects or seasonal effects and store effects, and also random components:
+$$q_{kjt} = \Bigg[\prod_{r=1}^n \Big(\frac{p_{krt}}{\overline{p_{kt}}}\Big)^{\beta_{rj}}
+\times
+\prod_{l=1}^3\gamma_{lrj}^{D_{lkrt}}\Bigg]
+\Bigg[\prod_{t=1}^T\delta_{jt}^{X_t}\Bigg]
+\Bigg[\prod_{k=1}^K\lambda_{kj}^{Z_k}\Bigg]
+e^{\epsilon_{kjt}}
+\qquad(1.1)$$
+where:  
+$q_{kjt}$ is the unit sales of brand j in store k, week t;  
+$p_{krt}$ is the unit price for brand r in store k, week t;
+$\overline{p_{kt}}$ is the median regular unit price for brand r in store k, week t;  
+$D_{lkrt}$ is an indicator variable for feature or display advertising.  
+$X_t$ is an indicator variable: 1 if observation is in week t;  
+$Z_k$ an indicator variable: 1 if observation is in store k;  
+$\beta_{rj}$ is the own-brand ($r=j$) and cross-brand ($r{\neq}j$) price discount elasticities;  
+$\gamma_{lrj}$ feature only (l=1), display only (l=2), feature & display (l=3) multipliers;  
+$\delta_{jt}$ seasonal multiplier for brand j, week t;  
+$\lambda_{kj}$ store multiplier for brand j, store k;  
+$\epsilon_{kjt}$ is the disturbance term.
+
+<br/>  
+
+For the report, I adapt the model in (1.1) to the dataset for beer sold in Dominick's Finer Foods. For the data provided, I replace the week dummy with quarter dummies to capture quarterly seasonality. In addition, I omit the store dummy as it is not available, and have to assume homogeneity across DFF stores. In reality, different stores will differ in the timing and nature of promotions, and store-specific data is important in the $SCAN{*}PRO model analysis (van Heerde, Leeflang and Wittink, 2002). The homogeneity assumption here allows the use of the aggregated data to increase the knowledge about the effect of promotions.
+
+Furthermore, unlike the general $SCAN{*}PRO$ model in whice brand price is divided by the median regular price to capture the deviations, I use price alone as a predictor in order to interpret the coefficient as the price elasticity of demand.
+
+Finally, since additional data on display and features is available, as continuous variables, the display and feature variables are raised to an unknown power to capture the effect of display and features on sales. I include an intercept and get Model (1.2) which can be estimated with OLS regression after taking the logarithms of both sides of the equation to make the model additive, Model (1.3).  
+
+$$q_{jt} =  constant
+\Bigg[\prod_{r=1}^n p_{rt}^{\beta_{rj}}
+\times
+{Display_{rt}}^{\gamma_{rj}}
+\times
+{Feature_{rt}}^{\phi_{rj}}\Bigg]
+\Bigg[\prod_{t=1}^T\prod_{q=2}^4\delta_{qjt}^{X_{qt}}\Bigg]
+e^{\epsilon_{jt}}
+\qquad(1.2)$$
+
+\bigbreak
+
+$$ln(q_{jt}) =  constant'
++ \sum_{r=1}^n {\beta_{rj}ln(p_{rt})}
++ \sum_{r=1}^n {\gamma_{rj}ln(Display_{rt})}
++ \sum_{r=1}^n {\phi_{rj}ln(Feature_{rt})}
++ \sum_{t=2}^T \sum_{q=2}^4 {ln(\delta_{qjt})X_{qt}}
++ \epsilon_{jt}
+\qquad(1.3)$$
+
+\bigbreak
+
+where:  
+The constant captures average sales without price and promotion effects in quarter 1;  
+$q_{jt}$ is the unit sales of brand j in week t;  
+$p_{rt}$ is the unit price for brand r in week t;  
+$Display_{rt}$ is the percentage of SKUs of brand r that are on display promotion in week t;  
+$Feature_{rt}$ is the percentage of SKUs of brand r that are on feature promotion in week t;  
+$X_{qt}$ is a dummy variable indicating week t is in quarter q. $Q_{1}$ is omitted as there is a constant;  
+$\beta_{rj}$ is the own-brand ($r=j$) and cross-brand ($r{\neq}j$) price discount elasticities;  
+$\gamma_{rj}$ is the proportional effect of display;  
+$\phi_{rj}$ is the proportional effect of feature;  
+$\delta_{qjt}$ is the quarterly seasonal multiplier for brand j;  
+$\epsilon_{jt}$ is the disturbance term.
+
+
+<br/>
+
+To choose the right model, collinearity diagnostics were performed to check for multicollinearity issues which could lead to unstable regression estimates. Specifically, I regressed price variable on display and feature to understang how much of price variation is explained by the promotion activities, I measured variance inflation factors, and compared goodness-of-fit (using adjusted $R^2$) of different model specifications. The best performing model chosen was (1.3) for all three brands. For brand 3, removing display effect did give a better fit, however, I decided to control for display and test the effect in the model.
+
+The results are summarised in Table 1. The applied $SCAN{*}PRO$ model captures circa 65%, 67% and 69% of variation in sales.
+
+<br/>
+
+
+```{r model, echo=FALSE}
+data$LOGSALESBRAND1 <- log(data$SALESBRAND1)
+data$LOGSALESBRAND2 <- log(data$SALESBRAND2)
+data$LOGSALESBRAND3 <- log(data$SALESBRAND3)
+data$LOGPRICEBRAND1 <- log(data$PRICEBRAND1)
+data$LOGPRICEBRAND2 <- log(data$PRICEBRAND2)
+data$LOGPRICEBRAND3 <- log(data$PRICEBRAND3)
+data$LOGDISPLAYBRAND1 <- log(data$display_brand1 + 1)
+data$LOGDISPLAYBRAND2 <- log(data$display_brand2 + 1)
+data$LOGDISPLAYBRAND3 <- log(data$display_brand3 + 1)
+data$LOGFEATUREBRAND1 <- log(data$FEATUREBRAND1 + 1)
+data$LOGFEATUREBRAND2 <- log(data$FEATUREBRAND2 + 1)
+data$LOGFEATUREBRAND3 <- log(data$FEATUREBRAND3 + 1)
+
+
+m1 <- lm(LOGSALESBRAND1 ~ LOGPRICEBRAND1 + LOGPRICEBRAND2 + LOGPRICEBRAND3 + 
+             LOGDISPLAYBRAND1 + LOGDISPLAYBRAND2 + LOGDISPLAYBRAND3 +
+             LOGFEATUREBRAND1 + LOGFEATUREBRAND2 + LOGFEATUREBRAND3 +
+             Quarter_2 + Quarter_3 + Quarter_4, data = data)
+m2 <- lm(LOGSALESBRAND2 ~ LOGPRICEBRAND1 + LOGPRICEBRAND2 + LOGPRICEBRAND3 + 
+           LOGDISPLAYBRAND1 + LOGDISPLAYBRAND2 + LOGDISPLAYBRAND3 +
+           LOGFEATUREBRAND1 + LOGFEATUREBRAND2 + LOGFEATUREBRAND3 +
+           Quarter_2 + Quarter_3 + Quarter_4, data = data)
+m3 <- lm(LOGSALESBRAND3 ~ LOGPRICEBRAND1 + LOGPRICEBRAND2 + LOGPRICEBRAND3 + 
+           LOGDISPLAYBRAND1 + LOGDISPLAYBRAND2 + LOGDISPLAYBRAND3 + 
+           LOGFEATUREBRAND1 + LOGFEATUREBRAND2 + LOGFEATUREBRAND3 +
+           Quarter_2 + Quarter_3 + Quarter_4, data = data)
+
+tab_model(m1,m2,m3, 
+          title = "<i><font color='grey'>Table 1: SCAN*PRO Model Results</font></i>")
+```
+
+<br/>
+
+**Own-price elasticity** for all three brands is as expected negative and very significant (p<0.001), that is, an increase in price will lead to a decrease in sales. Specifically, the price elasticity for the three brands are is -3.04, -2.24 and -4.70, so a 1 percent increase in the price of beer can reduce beer sales by 3.04, 2.24 and 4.7 percent respectively. Brand 2 has the lowest price elasticity, and this could be due to the fact that there is no week in the dataset in which brand 2 had no promotions on, and hence less sales variation is attributed to price changes.
+
+Some of the results for **cross-price elasticity** are surprising. Firstly, not all coefficients are significant. The results suggest that sales of brand 1 and brand 2 are affected by the price of brand 3 only. Most importantly, the direction of the effect is counterintuitive as it suggest that an increase in the price of brand 3 can reduce the sales of brands 1 and 2. The result could be explained by an opposite movement in price for the brands, that was captured falsely as a cross-price elasticity since beer is a cheap consumer product and luxury effects do not apply. Brand 3 sales is only affected by the price of brand 2 in the expected positive effect. A 1% increase in the price of brand 2 can increase the sales of brand 3 by 0.63% on average.
+
+**Display promotion** effects are statistically significant for all 3 beer brands. A 10% increase in the proportion of SKU that brand 1 puts on bonus buys (display) will increase sales by 8.1%. For brand 2, the result is also economically large as a 10% increase in the proportion of beers on display will increase sales by around 24%. For brand 3 the coefficient of $ln(Display)$ is negative and significant at the 5% level. It is likely that the model suffers from an endogeneity problem due to some unobserved factor causing bias in the estimator. Furthermore, competitive effects of display promotion are present on brands 1 and 3, which are counterintuitively positive. Again, it appears that this is due to an omitted variable bias.  
+
+Brand 1 is the only beer which has a statistically and economically significant effect of **feature promotion** on sales, and a 10% increase in the proportion of beers put on price specials (feature) will increase sales by 21%. There are no significant competitive feature promotion effects.
+
+**Quarterly seasonality** has an effect on beer sales. Given theh model output, coefficient for quarter effects are transformed back by taking the exponental: $\delta_{jt} = e^{\delta_{jt}'}$, where $\delta_{jt}'={ln(\delta_{jt})}$. All other thing being equal, brand 1 sales are 1.34% higher in the third quarter and 1.36% higher in the fourth quarter compared to sales in quarter 1. The result agrees with research on the seasonality of alcohol consumption.
+
+Weekly sales for the three beer brands are given by the following equations:  
+
+- $q_{1t} =  `r exp(summary(m1)$coefficients[1,1])` \times p_{1t}^{-3.04} \times p_{3t}^{-1.29} \times {Display_{1t}}^{0.81} \times {Display_{2t}}^{1.55} \times
+{Feature_{1t}}^{1.55} \times `r round(exp(0.29026),2)`^{Q_3} \times `r round(exp(0.30717),2)`^{Q_4}$  
+
+- $q_{2t} =  `r exp(summary(m2)$coefficients[1,1])` \times p_{2t}^{-2.24} \times p_{3t}^{-0.58} \times {Display_{2t}}^{3.17} \times `r round(exp(0.240016),2)`^{Q_3} \times `r round(exp(0.218481),2)`^{Q_4}$  
+
+- $q_{3t} =  `r exp(summary(m3)$coefficients[1,1])` \times p_{2t}^{0.63} \times p_{3t}^{-4.14} \times {Display_{2t}}^{2.07} \times {Display_{3t}}^{-0.42} \times `r round(exp(0.20533),2)`^{Q_3} \times `r round(exp(0.28478),2)`^{Q_4}$  
+
+<br/>
+
+```{r incremental_sales, include=FALSE}
+m1.results <- summary(m1)$coefficients[,1]
+m2.results <- summary(m2)$coefficients[,1]
+m3.results <- summary(m3)$coefficients[,1]
+
+b1.actual <- sum(data$SALESBRAND1)
+b1.baseline <- sum(exp(m1.results["(Intercept)"]) * 
+                     data$PRICEBRAND1^m1.results["LOGPRICEBRAND1"] *
+                     data$PRICEBRAND2^m1.results["LOGPRICEBRAND2"] *
+                     data$PRICEBRAND3^m1.results["LOGPRICEBRAND3"] *
+                     exp(m1.results["Quarter_2"])^data$Quarter_2 * 
+                     exp(m1.results["Quarter_3"])^data$Quarter_3 * 
+                     exp(m1.results["Quarter_4"])^data$Quarter_4)
+
+b2.actual <- sum(data$SALESBRAND2)
+b2.baseline <- sum(exp(m2.results["(Intercept)"]) * 
+                     data$PRICEBRAND1^m2.results["LOGPRICEBRAND1"] *
+                     data$PRICEBRAND2^m2.results["LOGPRICEBRAND2"] *
+                     data$PRICEBRAND3^m2.results["LOGPRICEBRAND3"] *
+                     exp(m2.results["Quarter_2"])^data$Quarter_2 * 
+                     exp(m2.results["Quarter_3"])^data$Quarter_3 * 
+                     exp(m2.results["Quarter_4"])^data$Quarter_4)
+
+b3.actual <- sum(data$SALESBRAND3)
+b3.baseline <- sum(exp(m3.results["(Intercept)"]) * 
+                     data$PRICEBRAND1^m3.results["LOGPRICEBRAND1"] *
+                     data$PRICEBRAND2^m3.results["LOGPRICEBRAND2"] *
+                     data$PRICEBRAND3^m3.results["LOGPRICEBRAND3"] *
+                     exp(m3.results["Quarter_2"])^data$Quarter_2 * 
+                     exp(m3.results["Quarter_3"])^data$Quarter_3 * 
+                     exp(m3.results["Quarter_4"])^data$Quarter_4)
+
+
+b1.incremental <- b1.actual - b1.baseline
+b2.incremental <- b2.actual - b2.baseline
+b3.incremental <- b3.actual - b3.baseline
+```
+Finally, I examine the incremental value that display and feature promotions generate, on top of baseline sales. To compute the baseline sales without the promotional effects, I turn off promotions in above models but include price and seasonal effects. Incremental sales for the three brands are 26.83%, 29.14% and 21.23% of actual sales respectively (Appendix A Table 3).  
+
+
+<br/>  
+
+#### **4. Discussion and Implications for Retail Managers**  
+
+Sales for beer was found to be trend stationary which agrees with the empirical results that promotion effects are not permanent (Srinivasan et al., 2004). In the analysis, we observe a high price sensitivity of sales, but less concluding results on cross-price elasticities. Seasonality was found significant with higher sales in quarters 3 and 4. These marketplace effects should be considered when retailers make decisions about promotions and the potential pay-off.
+
+For brand 1, both display and feature promotions contribute to sales. However, we saw that feature promotions have a larger effect, but there is more focus on display than feature promotions by the retailer (Appendix A Table 2). Hence, there is an opportunity for the retailer to review budget allocation to improve profit performance by increasing returns on promotion and reducing costs.
+
+Display promotions have a very large effect on brand 2 sales, contrary to feature promotions that was found insignificant. The insight to DFF is to lower feature efforts and focus on maximising payoffs from display promotion activities.
+
+The report suffered from some limitations that should be researched further. Firstly, some results on cross-price elasticities and display promotions were counterintuitive which is likely due to omitting a confounder and endogeneity. In the case of price endogeneity, the instrumental variable approach could be adopted using wholesale prices to estimate the model. It should be investigated whether the results are highlighting reverse causality. For example, a reduction in brand 3 price can be in response to higher sales for brand 1. Furthermore, residual diagnostic (Appendix A) show presence of autocorrelation in the errors. Although, estimators may still be unbiased, prediction intervals will not provide accurate coverage.
+
+In addition, more information could uncover insights on daily seasonality, store effects and profitability of promotion. Daily sales availability can help retailers to understand the most profitable days of the week for promotions. Store-level data is also important since different stores will differ in the timing and type of promotion, and perhaps the customers kind, and promotions may have stronger effects in some stores. Cost of different promotions can be used to find the profitability of activities and find the optimal allocation of feature and advertising. 
+
+Promotions are key in driving sales, but not without cost. Thus, retail managers should closely examine the implications of these tactics. Building on the results of this report, managers comprehension of customers' habits should guide the timing of promotions as well as when to use more aggressive promotions. In addition, they should decide how to invest on different promotion types and channels, like in-store and online. Promotional efforts should also be tailored to the segment targeted, such as new vs existing customers, regular vs occasional drinkers, and also the consumer mindset metrics they are trying to affect. Finally, retailers need to understand the duration of effects on sales together with delayed purchase and forward purchase effects when deciding which items to promote and how often.
+
+
+<br/>  
+
+***
+
+### **References**
+
+* van Heerde, H.J., Leeflang, P.S.H. and Wittink, D.R. (2002). How Promotions Work: SCAN$*$PRO-Based Evolutionary Model Building. Schmalenbach Business Review, 54(3), pp.198-220.   
+
+* Andrews, R.L., Currim, I.S., Leeflang, P. and Lim, J. (2008). Estimating the SCAN$*$PRO model of store sales: HB, FM or just OLS? International Journal of Research in Marketing, 25(1), pp.22-33.
+
+* Srinivasan, S., Pauwels, K., Hanssens, D.M. and Dekimpe, M.G. (2004). Do Promotions Benefit Manufacturers, Retailers, or Both? Management Science, 50(5), pp.617-629.  
+
+* Gao, X.M., Wailes, E.J. and Cramer, G.L. (1995). A microeconometric model analysis of US consumer demand for alcoholic beverages. Applied Economics, 27(1), pp.59-69.
+
+<br/>  
+
+***
+
+### **Appendix A**  
+
+```{r descriptive stats, echo=FALSE}
+desc_freq <- data.frame(Brand1 = c(nrow(data), sum(data$SALESBRAND1!=0), sum(data$display_brand1==0 & data$FEATUREBRAND1==0),
+                                    sum(data$display_brand1!=0 & data$FEATUREBRAND1==0), sum(data$display_brand1==0 & data$FEATUREBRAND1!=0),
+                                    sum(data$display_brand1!=0 & data$FEATUREBRAND1!=0)),
+                         Brand2 = c(nrow(data), sum(data$SALESBRAND2!=0), sum(data$display_brand2==0 & data$FEATUREBRAND2==0),
+                                    sum(data$display_brand2!=0 & data$FEATUREBRAND2==0), 
+                                    sum(data$display_brand2==0 & data$FEATUREBRAND2!=0), sum(data$display_brand2!=0 & data$FEATUREBRAND2!=0)),
+                         Brand3 = c(nrow(data), sum(data$SALESBRAND3!=0), sum(data$display_brand3==0 & data$FEATUREBRAND3==0),
+                                    sum(data$display_brand3!=0 & data$FEATUREBRAND3==0), sum(data$display_brand3==0 & data$FEATUREBRAND3!=0),
+                                    sum(data$display_brand3!=0 & data$FEATUREBRAND3!=0)),
+                         row.names = c("Number of Weeks", "Number of Observations", "% Weeks no promotion", 
+                                       "% Weeks only display promotion", "% Weeks only feature promotion", 
+                                       "% Weeks display and feature promotion"))
+
+desc_freq[c(3:6),] <- round(desc_freq[c(3:6),]/nrow(data)*100,1)
+kable(desc_freq, caption = "Table 2: Descriptive statistics for the beer data") %>% kable_styling()
+```
+
+<br/>  
+
+```{r visualise_price, echo=FALSE}
+prices <- data %>% dplyr::select(Week, PRICEBRAND1, PRICEBRAND2, PRICEBRAND3) %>% gather("brand", "price", 2:4)
+       
+ggplot(prices, aes(x=Week, y=price)) +
+  geom_line(color="steelblue") +
+  facet_grid(brand ~ .) +
+  labs(title = "Figure 3: Retail Price per brand", x= "Week", y="Price (in $)") +
+  theme(plot.title = element_text(colour = "grey40", size = 11, face = "italic")) 
+```
+
+<br/>  
+
+```{r visualise_promo, echo=FALSE}
+promos <- data %>% rename(BRAND1 = "display_brand1", BRAND2 = "display_brand2", BRAND3 = "display_brand3") %>%
+                            dplyr::select(Week, BRAND1, BRAND2, BRAND3) %>% 
+                            gather("brand", "Display", 2:4)
+features <- data %>% dplyr::select(Week, FEATUREBRAND1, FEATUREBRAND2, FEATUREBRAND3) %>% gather("brand", "Features", 2:4)
+promos <- cbind(promos, features[,"Features"])
+promos <- promos %>% gather("promotion", "percentage", 3:4)
+
+ggplot(promos, aes(x=Week, y=percentage)) +
+  geom_line(color="steelblue") +
+  facet_grid(promotion ~ brand) +
+  labs(title = "Figure 4: Display and features promotions per brand", x= "Week", y="% of SKUs promoted") +
+  theme(plot.title = element_text(colour = "grey40", size = 11, face = "italic"))
+```
+
+<br/>  
+
+```{r visualise_incremental, echo=FALSE}
+data.frame(Actual = c(b1.actual, b2.actual, b3.actual),
+           Baseline = c(b1.baseline, b2.baseline, b3.baseline),
+           Incremental = c(b1.incremental, b2.incremental, b3.incremental),
+           Percentage = c(round(b1.incremental/b1.actual*100,2), round(b2.incremental/b2.actual*100,2), round(b3.incremental/b3.actual*100,2))) %>%
+  kable(caption = "Table 3: Incremental Sales due to display and feature promotion") %>% 
+  kable_styling(full_width = T)
+```
+
+<br/>  
+
+<i><font color='grey'>Figure 5: Residual Plots - Brand 1</font></i>  
+```{r, echo=FALSE}
+checkresiduals(m1)
+```
+<i><font color='grey'>Figure 6: Residual Plots - Brand 2</font></i>  
+```{r, echo=FALSE}
+checkresiduals(m2)
+```
+<i><font color='grey'>Figure 7: Residual Plots - Brand 3</font></i>  
+```{r, echo=FALSE}
+checkresiduals(m3)
+```
+
+<br/>  
+
+
+### **Appendix B - Code**
+
+```{r}
+# setup
+
+setwd("C:/Users/Fay_Asus/Documents/MSc/RMA/Individual assignment")
+data <- read_xlsx("beer_data_chicago_Dominicks.xlsx")
+```
+
+```{r}
+# descriptive stats
+
+desc_freq <- data.frame(Brand1 = c(nrow(data), sum(data$SALESBRAND1!=0), sum(data$display_brand1==0 & data$FEATUREBRAND1==0),
+                                    sum(data$display_brand1!=0 & data$FEATUREBRAND1==0), sum(data$display_brand1==0 & data$FEATUREBRAND1!=0),
+                                    sum(data$display_brand1!=0 & data$FEATUREBRAND1!=0)),
+                         Brand2 = c(nrow(data), sum(data$SALESBRAND2!=0), sum(data$display_brand2==0 & data$FEATUREBRAND2==0),
+                                    sum(data$display_brand2!=0 & data$FEATUREBRAND2==0), 
+                                    sum(data$display_brand2==0 & data$FEATUREBRAND2!=0), sum(data$display_brand2!=0 & data$FEATUREBRAND2!=0)),
+                         Brand3 = c(nrow(data), sum(data$SALESBRAND3!=0), sum(data$display_brand3==0 & data$FEATUREBRAND3==0),
+                                    sum(data$display_brand3!=0 & data$FEATUREBRAND3==0), sum(data$display_brand3==0 & data$FEATUREBRAND3!=0),
+                                    sum(data$display_brand3!=0 & data$FEATUREBRAND3!=0)),
+                         row.names = c("Number of Weeks", "Number of Observations", "% Weeks no promotion", 
+                                       "% Weeks only display promotion", "% Weeks only feature promotion", 
+                                       "% Weeks display and feature promotion"))
+
+desc_freq[c(3:6),] <- round(desc_freq[c(3:6),]/nrow(data)*100,1)
+kable(desc_freq, caption = "Table 2: Descriptive statistics for the beer data") %>% kable_styling()
+```
+
+```{r}
+# visualise_sales
+
+sales <- data %>% dplyr::select(Week, SALESBRAND1, SALESBRAND2, SALESBRAND3) %>% gather("brand", "sales", 2:4)
+means <- sales %>% group_by(brand) %>% summarise(m = mean(sales))
+y <- data.frame(w = c(52, 104, 156, 208))
+
+ggplot(sales, aes(x=Week, y=sales)) +
+  geom_line(color="steelblue") +
+  facet_grid(brand ~ .) +
+  geom_hline(data=means, aes(yintercept=m), colour = "darkred", lwd = 0.05, alpha = 0.5) +
+  geom_vline(aes(xintercept = w), data = y, colour = "darkblue", linetype = "dashed", lwd = 0.05, alpha = 0.5) +
+  labs(title = "Figure 1: Weekly Sales per brand", x= "Week", y="Sales") +
+  theme(plot.title = element_text(colour = "grey40", size = 11, face = "italic"))
+```
+
+```{r}
+# qrt_dummy
+
+qrt_per_year <- 4
+weeks_per_year <- 52
+n <- nrow(data)
+# assign qrt from september 1989 to end of year
+qrt <- c(3,3,3,3,rep(4,weeks_per_year/qrt_per_year))
+l <- length(qrt)
+
+
+# loop to get a vector of quarter numbers for remaining weeks up to 5 years
+for (j in 1:(floor((n-l)/weeks_per_year)+1)){
+  for (i in 1:qrt_per_year){
+    qrt <- c(qrt, rep(i,weeks_per_year/qrt_per_year))
+  }
+}
+
+# keep 227 weeks - approximately 4.4 years
+qrt <- qrt[1:n]
+
+# add quarter data in dataset
+data$Quarter <- qrt
+
+# get dummies for each quarter
+data <- fastDummies::dummy_cols(data, select_columns = "Quarter")
+
+# check quarter dummies in dataset
+head(data[,c(tail(names(data),5))])
+```
+
+
+```{r}
+# visualise_price
+
+prices <- data %>% dplyr::select(Week, PRICEBRAND1, PRICEBRAND2, PRICEBRAND3) %>% gather("brand", "price", 2:4)
+       
+ggplot(prices, aes(x=Week, y=price)) +
+  geom_line(color="steelblue") +
+  facet_grid(brand ~ .) +
+  labs(title = "Figure 3: Retail Price per brand", x= "Week", y="Price (in $)") +
+  theme(plot.title = element_text(colour = "grey40", size = 11, face = "italic")) 
+```
+
+```{r}
+# visualise_promo
+
+promos <- data %>% rename(BRAND1 = "display_brand1", BRAND2 = "display_brand2", BRAND3 = "display_brand3") %>%
+                            dplyr::select(Week, BRAND1, BRAND2, BRAND3) %>% 
+                            gather("brand", "Display", 2:4)
+features <- data %>% dplyr::select(Week, FEATUREBRAND1, FEATUREBRAND2, FEATUREBRAND3) %>% gather("brand", "Features", 2:4)
+promos <- cbind(promos, features[,"Features"])
+promos <- promos %>% gather("promotion", "percentage", 3:4)
+
+ggplot(promos, aes(x=Week, y=percentage)) +
+  geom_line(color="steelblue") +
+  facet_grid(promotion ~ brand) +
+  labs(title = "Figure 4: Display and features promotions per brand", x= "Week", y="% of SKUs promoted") +
+  theme(plot.title = element_text(colour = "grey40", size = 11, face = "italic"))
+```
+
+```{r}
+# correlations
+ggpairs(data[,c("SALESBRAND1", "PRICEBRAND1", "display_brand1", "FEATUREBRAND1")], 
+        title = "Figure 2a: Brand 1 Correlations",
+        lower = list(continuous = wrap("smooth", size=0.1))) +
+  theme(plot.title = element_text(colour = "grey40", size = 11, face = "italic"))
+ggpairs(data[,c("SALESBRAND2", "PRICEBRAND2", "display_brand2", "FEATUREBRAND2")],
+        title = "Figure 2b: Brand 2 Correlations",
+        lower = list(continuous = wrap("smooth", size=0.1))) +
+  theme(plot.title = element_text(colour = "grey40", size = 11, face = "italic"))
+ggpairs(data[,c("SALESBRAND3", "PRICEBRAND3", "display_brand3", "FEATUREBRAND3")],
+        title = "Figure 2c: Brand 3 Correlations",
+        lower = list(continuous = wrap("smooth", size=0.1))) +
+  theme(plot.title = element_text(colour = "grey40", size = 11, face = "italic"))
+```
+
+```{r}
+# take logs of variables
+data$LOGSALESBRAND1 <- log(data$SALESBRAND1)
+data$LOGSALESBRAND2 <- log(data$SALESBRAND2)
+data$LOGSALESBRAND3 <- log(data$SALESBRAND3)
+data$LOGPRICEBRAND1 <- log(data$PRICEBRAND1)
+data$LOGPRICEBRAND2 <- log(data$PRICEBRAND2)
+data$LOGPRICEBRAND3 <- log(data$PRICEBRAND3)
+data$LOGDISPLAYBRAND1 <- log(data$display_brand1 + 1)
+data$LOGDISPLAYBRAND2 <- log(data$display_brand2 + 1)
+data$LOGDISPLAYBRAND3 <- log(data$display_brand3 + 1)
+data$LOGFEATUREBRAND1 <- log(data$FEATUREBRAND1 + 1)
+data$LOGFEATUREBRAND2 <- log(data$FEATUREBRAND2 + 1)
+data$LOGFEATUREBRAND3 <- log(data$FEATUREBRAND3 + 1)
+
+# SCANPRO model for the three brands
+m1 <- lm(LOGSALESBRAND1 ~ LOGPRICEBRAND1 + LOGPRICEBRAND2 + LOGPRICEBRAND3 + 
+             LOGDISPLAYBRAND1 + LOGDISPLAYBRAND2 + LOGDISPLAYBRAND3 +
+             LOGFEATUREBRAND1 + LOGFEATUREBRAND2 + LOGFEATUREBRAND3 +
+             Quarter_2 + Quarter_3 + Quarter_4, data = data)
+m2 <- lm(LOGSALESBRAND2 ~ LOGPRICEBRAND1 + LOGPRICEBRAND2 + LOGPRICEBRAND3 + 
+           LOGDISPLAYBRAND1 + LOGDISPLAYBRAND2 + LOGDISPLAYBRAND3 +
+           LOGFEATUREBRAND1 + LOGFEATUREBRAND2 + LOGFEATUREBRAND3 +
+           Quarter_2 + Quarter_3 + Quarter_4, data = data)
+m3 <- lm(LOGSALESBRAND3 ~ LOGPRICEBRAND1 + LOGPRICEBRAND2 + LOGPRICEBRAND3 + 
+           LOGDISPLAYBRAND1 + LOGDISPLAYBRAND2 + LOGDISPLAYBRAND3 + 
+           LOGFEATUREBRAND1 + LOGFEATUREBRAND2 + LOGFEATUREBRAND3 +
+           Quarter_2 + Quarter_3 + Quarter_4, data = data)
+
+tab_model(m1,m2,m3)
+```
+
+```{r}
+# Look at variance inflation factor in the models to check the effect of collinearity on the variance of our regression estimates. No values are concernigly high
+
+car::vif(m1)
+car::vif(m2)
+car::vif(m3)
+```
+
+```{r}
+# We check the proportion of observed variation in price explained by the other two predictors, display and feature
+# The results are intuitive showing significant postive correlation for brand 1 and 3
+
+p1 <- lm(data = data, LOGPRICEBRAND1 ~ LOGDISPLAYBRAND1 + LOGFEATUREBRAND1)
+p2 <- lm(data = data, LOGPRICEBRAND2 ~ LOGDISPLAYBRAND2 + LOGFEATUREBRAND2)
+p3 <- lm(data = data, LOGPRICEBRAND3 ~ LOGDISPLAYBRAND3 + LOGFEATUREBRAND3)
+data.frame(Brand1 = summary(p1)$r.squared, 
+           Brand2 = summary(p2)$r.squared, 
+           Brand3 = summary(p3)$r.squared)
+```
+
+```{r}
+m1.2 <- lm(LOGSALESBRAND1 ~ LOGPRICEBRAND1 + LOGPRICEBRAND2 + LOGPRICEBRAND3 + 
+             LOGDISPLAYBRAND2 + LOGDISPLAYBRAND3 +
+             LOGFEATUREBRAND1 + LOGFEATUREBRAND2 + LOGFEATUREBRAND3 +
+             Quarter_2 + Quarter_3 + Quarter_4, data = data)
+
+m3.2 <- lm(LOGSALESBRAND3 ~ LOGPRICEBRAND1 + LOGPRICEBRAND2 + LOGPRICEBRAND3 + 
+           LOGDISPLAYBRAND1 + LOGDISPLAYBRAND2 +
+           LOGFEATUREBRAND1 + LOGFEATUREBRAND2 + LOGFEATUREBRAND3 +
+           Quarter_2 + Quarter_3 + Quarter_4, data = data)
+
+summary(m1)$adj.r.squared
+summary(m1.2)$adj.r.squared
+summary(m3)$adj.r.squared
+summary(m3.2)$adj.r.squared
+```
+
+```{r}
+# check residuals
+checkresiduals(m1)
+checkresiduals(m2)
+checkresiduals(m3)
+```
+
+
+```{r}
+# Find the incremental sales for each brand: Incremental sales = Actual sales - Baseline sales
+
+m1.results <- summary(m1)$coefficients[,1]
+m2.results <- summary(m2)$coefficients[,1]
+m3.results <- summary(m3)$coefficients[,1]
+
+b1.actual <- sum(data$SALESBRAND1)
+b1.baseline <- sum(exp(m1.results["(Intercept)"]) * 
+                     data$PRICEBRAND1^m1.results["LOGPRICEBRAND1"] *
+                     data$PRICEBRAND2^m1.results["LOGPRICEBRAND2"] *
+                     data$PRICEBRAND3^m1.results["LOGPRICEBRAND3"] *
+                     exp(m1.results["Quarter_2"])^data$Quarter_2 * 
+                     exp(m1.results["Quarter_3"])^data$Quarter_3 * 
+                     exp(m1.results["Quarter_4"])^data$Quarter_4)
+
+b2.actual <- sum(data$SALESBRAND2)
+b2.baseline <- sum(exp(m2.results["(Intercept)"]) * 
+                     data$PRICEBRAND1^m2.results["LOGPRICEBRAND1"] *
+                     data$PRICEBRAND2^m2.results["LOGPRICEBRAND2"] *
+                     data$PRICEBRAND3^m2.results["LOGPRICEBRAND3"] *
+                     exp(m2.results["Quarter_2"])^data$Quarter_2 * 
+                     exp(m2.results["Quarter_3"])^data$Quarter_3 * 
+                     exp(m2.results["Quarter_4"])^data$Quarter_4)
+
+b3.actual <- sum(data$SALESBRAND3)
+b3.baseline <- sum(exp(m3.results["(Intercept)"]) * 
+                     data$PRICEBRAND1^m3.results["LOGPRICEBRAND1"] *
+                     data$PRICEBRAND2^m3.results["LOGPRICEBRAND2"] *
+                     data$PRICEBRAND3^m3.results["LOGPRICEBRAND3"] *
+                     exp(m3.results["Quarter_2"])^data$Quarter_2 * 
+                     exp(m3.results["Quarter_3"])^data$Quarter_3 * 
+                     exp(m3.results["Quarter_4"])^data$Quarter_4)
+
+
+b1.incremental <- b1.actual - b1.baseline
+b2.incremental <- b2.actual - b2.baseline
+b3.incremental <- b3.actual - b3.baseline
+
+data.frame(Actual = c(b1.actual, b2.actual, b3.actual),
+           Baseline = c(b1.baseline, b2.baseline, b3.baseline),
+           Incremental = c(b1.incremental, b2.incremental, b3.incremental),
+           Percentage = c(round(b1.incremental/b1.actual*100,2), round(b2.incremental/b2.actual*100,2), round(b3.incremental/b3.actual*100,2)))
+```
+
+
+***
+
+
+
+
+
